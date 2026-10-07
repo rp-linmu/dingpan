@@ -57,16 +57,6 @@
 
 本项目仅供个人学习与自有账号的数据可视化使用；请使用自己的账号、遵守所在平台的规则；所有数据仅保存在本地。
 
-## 交流与支持
-
-<img src="docs/wechat-qr.png" width="200" alt="个人微信二维码（放置 docs/wechat-qr.png 后显示）" />
-
-**加微信交流**
-
-<img src="docs/donate-qr.png" width="200" alt="微信收款码（放置 docs/donate-qr.png 后显示）" />
-
-**如果这个工具对你有帮助，请作者喝杯咖啡 ☕**
-
 ## License
 
 [MIT](LICENSE)
