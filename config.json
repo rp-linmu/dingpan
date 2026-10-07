@@ -1,0 +1,8 @@
+{
+  "_comment": "滚动撮合监控配置：endpoints 匹配捕获到的接口路径片段；poll 留空=纯被动零请求（推荐），如需兜底轮询 intervalSec 不得低于10；queryUrl/queryTemplate 为盘口按需查询的种子模板（监控启动时预填，运行中会被页面最新请求覆盖）",
+  "endpoints": ["findBuy5AndSell5"],
+  "parser": "./parser.mjs",
+  "poll": null,
+  "queryUrl": "https://pm.gx.csg.cn/GXJYHD/qctc-pm-trade-zcq-jzjz-facade/jzjz/facade/findBuy5AndSell5",
+  "queryTemplate": { "seqId": 3170, "code": "D20260925_H02", "colName": "", "colSort": "", "isPointTrade": "1", "isPointBlock": "0", "codeMonth": "", "tradeDate": [], "tradeMonth": [], "tradePoint": [], "tradeTypes": [] }
+}

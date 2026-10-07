@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>滚动撮合 · 窗口价格监控</title>
+<script>
+  // 防闪白：渲染前按用户偏好/系统偏好设定主题（完整逻辑在正文脚本）
+  try {
+    var _t = localStorage.getItem('dpTheme');
+    if (!_t) _t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = _t;
+  } catch (e) {}
+</script>
+<script src="/echarts.min.js"></script>
+<style>
+  :root {
+    --bg: #fbf6e7; --panel: #fffdf3; --panel2: #f5eeda; --border: #e6dabb;
+    --text: #3e3225; --muted: #8a7f6a; --up: #d64541; --down: #1e9e5a; --flat: #a09880;
+    --accent: #a0681f;
+    --heading: #5a4a2e; --faint: #a89d85;
+    --dot-stale: #d69e2e; --dot-off: #777;
+    --banner-bg: #fbeae5; --banner-border: #e5b8ab; --banner-text: #a33d2a;
+    --btn-bg: #f1e8d2; --btn-bg-hover: #e9ddbe;
+    --chip-on-bg: #f3e3bd; --chip-on-text: #7a5210;
+    color-scheme: light;
+  }
+  /* 暗色主题：暖黑棕底，延续米色系气质；提亮涨跌色保证暗底可读 */
+  :root[data-theme="dark"] {
+    --bg: #211c14; --panel: #2a2419; --panel2: #332c1e; --border: #4a4030;
+    --text: #e8dfc8; --muted: #a89d85; --up: #e05a55; --down: #2fb573; --flat: #7d8aa0;
+    --accent: #d19a4a;
+    --heading: #d6c9a8; --faint: #857a63;
+    --dot-stale: #d69e2e; --dot-off: #666;
+    --banner-bg: #4a2a1e; --banner-border: #6e3a28; --banner-text: #f0a08a;
+    --btn-bg: #3a3222; --btn-bg-hover: #453b28;
+    --chip-on-bg: #4a3a1a; --chip-on-text: #ecc984;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Microsoft YaHei", system-ui, sans-serif; font-size: 14px; padding: 14px; transition: background-color .3s; }
+  textarea::placeholder { color: var(--muted); opacity: .75; }
+  .num { font-family: Consolas, "Courier New", monospace; }
+
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 12px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  .status { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); align-items: center; }
+  .chip { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--down); margin-right: 4px; animation: pulse 2s infinite; }
+  .dot.stale { background: var(--dot-stale); animation: none; }
+  .dot.off { background: var(--dot-off); animation: none; }
+  @keyframes pulse { 0%,100% {opacity:1} 50% {opacity:.35} }
+
+  .banner { display: none; background: var(--banner-bg); border: 1px solid var(--banner-border); color: var(--banner-text); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+  .banner.show { display: block; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .card .k { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .card .v { font-size: 24px; font-weight: 700; }
+  .card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+  .panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--heading); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .chart { width: 100%; height: 280px; }
+  #traceChart { height: 340px; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
+  .toolbar label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  button { background: var(--btn-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
+  button:hover { background: var(--btn-bg-hover); border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .wgrid { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; max-height: 110px; overflow-y: auto; }
+  .wcell { font-size: 11px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel2); cursor: pointer; user-select: none; }
+  .wcell.on { background: var(--chip-on-bg); border-color: var(--accent); color: var(--chip-on-text); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:nth-child(1), td:nth-child(1), th:nth-child(2), td:nth-child(2) { text-align: left; }
+  thead th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  .tbl-wrap { max-height: 420px; overflow: auto; }
+  .up { color: var(--up); } .down { color: var(--down); } .flat { color: var(--flat); }
+
+  #waiting { text-align: center; padding: 60px 20px; color: var(--muted); }
+  #waiting .big { font-size: 20px; margin-bottom: 12px; color: var(--text); }
+  .hidden { display: none !important; }
+  footer { text-align: center; color: var(--faint); font-size: 11px; padding: 8px 0 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ 滚动撮合 · 窗口价格监控</h1>
+  <div class="status">
+    <span class="chip"><span class="dot" id="dot"></span><span id="stMode">连接中</span></span>
+    <span class="chip">同步 <span id="stSync">连接中</span></span>
+    <span class="chip">最后数据 <span class="num" id="stLast">-</span></span>
+    <span class="chip">被动捕获 <span class="num" id="stCap">0</span> 次</span>
+    <span class="chip">主动请求 <span class="num" id="stReq">0</span> 次</span>
+    <span class="chip">窗口 <span class="num" id="stWin">0</span> 个</span>
+    <span class="chip" id="themeBtn" title="切换 明色/暗色 主题" style="cursor:pointer;user-select:none">🌙 暗色</span>
+  </div>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<div id="waiting">
+  <div class="big">等待第一笔数据…</div>
+  <div>请确认：① 调试 Chrome 已登录平台并停留在「滚动撮合」页面；<br>
+       ② monitor.mjs 正在运行。页面自己刷新一次数据后，这里就会亮起来。<br>
+       <span class="num" id="waitCap">已被动捕获 0 个响应</span></div>
+</div>
+
+<div id="main" class="hidden">
+
+  <div class="cards" id="cards"></div>
+
+  <div class="panel" id="expectPanel" style="padding:8px 12px">
+    <h2 style="margin-bottom:6px">🎯 预期价格模板（48窗口 · 买入/卖出）
+      <span class="toolbar" style="gap:10px">
+        <select id="expMode" style="background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;color:var(--text);font-size:12px">
+          <option value="bs">两列：买入 卖出</option>
+          <option value="sb">两列：卖出 买入</option>
+          <option value="b">单列：仅买入</option>
+          <option value="s">单列：仅卖出</option>
+        </select>
+        <button id="expClear">清空</button>
+        <button id="expFile">📂 从模板文件读取</button>
+        <span id="expStatus" style="font-size:11px;color:var(--muted)">未导入</span>
+      </span>
+    </h2>
+    <textarea id="expText" rows="3" style="width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-family:Consolas,monospace;font-size:12px;resize:vertical" placeholder="也可从Excel直接粘贴：每行一个窗口，按时间顺序（D..H00 到 D..H23，两日）。支持三种格式：&#10;① 买入价[Tab或空格]卖出价   ② 时段/代码[Tab]买入价[Tab]卖出价（自动忽略非价格列）   ③ 单列价格（配合上方模式）&#10;例：450.5  520&#10;导入后：蓝线=买入预期曲线，紫线=卖出预期曲线；达标窗口柱子加边并在顶部提醒"></textarea>
+    <div style="margin-top:6px"><button id="expSave" class="primary">导入并应用</button></div>
+  </div>
+
+  <div class="panel" id="patrolPanel">
+    <h2>🎯 预期满足监控（重点窗口巡检）
+      <span class="toolbar" style="gap:10px">
+        <button id="patrolToggle" class="primary">开启监控</button>
+        <label>巡检间隔
+          <select id="patrolInterval" style="background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;color:var(--text);font-size:12px">
+            <option value="1">1 分钟</option><option value="2">2 分钟</option><option value="3">3 分钟</option>
+            <option value="5" selected>5 分钟</option><option value="10">10 分钟</option>
+            <option value="15">15 分钟</option><option value="30">30 分钟</option>
+          </select>
+        </label>
+        <span id="patrolStatus" style="font-size:11px;color:var(--muted)">未开启</span>
+      </span>
+    </h2>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 6px">
+      点击窗口标签选定巡检对象（最多 12 个，当前 <span class="num" id="patrolCount">0</span> 个）。开启后按设定间隔自动查询各窗口买卖五档，
+      对照买入/卖出预期价给出满足判定；<b>五档与申报量明细</b>为备选项——点击全景图柱子在盘口面板查看。
+      买入判定：可吃量=卖方申报中价 ≤ 预期的量，竞争量=买方申报中价 &gt; 预期的量；卖出对称。仅覆盖五档可见范围。
+    </div>
+    <div class="wgrid" id="patrolGrid" style="max-height:88px"></div>
+    <div class="tbl-wrap" style="max-height:300px;margin-top:6px"><table id="patrolTbl">
+      <thead><tr><th style="text-align:left">窗口</th><th>最新成交</th><th style="text-align:left">买入预期判定</th><th style="text-align:left">卖出预期判定</th><th>巡检时间</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </div>
+
+  <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+
+    <div style="flex:1 1 640px;min-width:560px">
+      <div class="panel">
+        <h2>
+          窗口价格全景
+          <span class="toolbar">
+            <label><input type="radio" name="base" value="central" checked> 较集中竞争价</label>
+            <label><input type="radio" name="base" value="last"> 较上一次</label>
+            <label><input type="radio" name="base" value="first"> 较监控首轮</label>
+          </span>
+        </h2>
+        <div class="chart" id="mainChart"></div>
+      </div>
+
+      <div class="panel">
+        <h2>量价配合（成交量 × 价格）</h2>
+        <div class="chart" id="volChart" style="height:200px"></div>
+      </div>
+    </div>
+
+    <div style="flex:1 1 320px;min-width:300px;max-width:400px">
+      <div class="panel" id="bookPanel">
+        <h2 style="font-size:13px">盘口（买卖五档）<span id="bookTitle" style="font-weight:400;color:var(--muted);font-size:11px"></span>
+          <button id="bookRefresh" style="margin-left:auto">刷新</button></h2>
+        <div id="bookLadder"></div>
+      </div>
+
+      <div class="panel" id="tradePanel" style="padding:10px 12px">
+        <h2 style="margin-bottom:6px;font-size:13px">最新成交明细
+          <span style="font-size:11px;color:var(--muted);font-weight:400">全局最近3笔，最新价以全景图为准</span></h2>
+        <div class="tbl-wrap" style="max-height:280px"><table id="tradeTbl">
+          <thead><tr><th style="text-align:left">时间</th><th style="text-align:left">窗口</th><th>价格</th><th>电量</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="panel">
+    <h2>
+      价格轨迹回放
+      <span class="toolbar">
+        <button data-sel="all">全选</button>
+        <button data-sel="none">清空</button>
+        <button data-sel="day1">只选前一日</button>
+        <button data-sel="day2">只选后一日</button>
+        <button data-sel="movers">涨跌TOP6</button>
+      </span>
+    </h2>
+    <div class="wgrid" id="wgrid"></div>
+    <div id="traceChart"></div>
+  </div>
+
+  <div class="panel">
+    <h2>明细 <button class="primary" id="btnCsv" style="margin-left:auto">导出 CSV</button></h2>
+    <div class="tbl-wrap"><table id="tbl">
+      <thead><tr id="thead"></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </div>
+</div>
+
+<footer>被动监听模式：对交易平台零额外请求 · 所有数据仅存本地 · Ctrl+C 停止后 data/ 目录可复盘</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = (v, d = 2) => v == null || isNaN(v) ? '-' : (+v).toFixed(d);
+// 交易代码：id '2026-09-25T00' → 'D20260925_H00'（与平台一致，表格/提示框用完整码）
+const dcode = id => /^(\d{4})-(\d{2})-(\d{2})T(\d{2})$/.test(String(id)) ? 'D' + String(id).slice(0, 10).replace(/-/g, '') + '_H' + String(id).slice(11, 13) : String(id);
+// 短代码：横坐标/图例用，去年份 D20260925_H00 → D0925_H00
+const scode = id => dcode(id).replace(/^D\d{4}/, 'D');
+// 时间统一按北京时间显示（存储为ISO/UTC，显示时转换）
+const BJ = { timeZone: 'Asia/Shanghai', hour12: false };
+const hhmm = s => { if (!s) return '-'; const d = new Date(s); return isNaN(d) ? String(s).slice(11, 19) : d.toLocaleTimeString('zh-CN', BJ); };
+const bjFull = s => { if (!s) return ''; const d = new Date(s); return isNaN(d) ? String(s) : d.toLocaleString('zh-CN', { ...BJ }); };
+let state = null, baseline = 'central';
+const charts = {};
+const selected = new Set();
+let chartsReady = false;
+
+function windowsSorted() { return [...(state?.windows || [])]; }
+
+const COLOR_HOLD_MS = 10 * 60 * 1000;   // 变动后保持彩色10分钟，之后退灰
+function deltaOf(w) {
+  if (baseline === 'first') return w.firstPrice != null && w.price != null ? w.price - w.firstPrice : null;
+  if (baseline === 'central') {
+    const c = w.extras && w.extras.centralized;
+    return c != null && w.price != null ? w.price - c : null;
+  }
+  // 较上一次：最近一次变动（10分钟内）→ 变动幅度；超时/无变动 → 0(灰)
+  if (w.lastChangeTs == null || w.lastChangeFrom == null || w.price == null) {
+    return w.prevPrice != null && w.price != null ? w.price - w.prevPrice : null;   // 兼容旧数据
+  }
+  const age = Date.now() - new Date(w.lastChangeTs).getTime();
+  return age > COLOR_HOLD_MS ? 0 : w.price - w.lastChangeFrom;
+}
+// ===== 明暗主题 =====
+// DOM/文字走 :root CSS 变量自动跟随；canvas 图表颜色集中在 THEMES，切换后 renderAll 重画。
+const THEMES = {
+  light: {
+    up: '#d64541', down: '#1e9e5a', cfl: '#8b98ad', cna: '#e6dcc2',
+    accent: '#a0681f', heading: '#5a4a2e', faint: '#a89d85',
+    axis: '#8a7f6a', split: '#eadfc8',
+    tipBg: '#fffdf3', tipBorder: '#e0d5ba', tipText: '#4a3f2e',
+    bookStripe: '#f5eeda', bookStripeText: '#5a4a2e',
+    buyExp: '#2563a8', sellExp: '#7c5cbf',
+    volBar: '#6f93c4', volLine: '#c2622b',
+    tracePalette: ['#2563a8', '#c2622b', '#d64541', '#1e9e5a', '#7c5cbf', '#0e9c94', '#d97d33', '#6d8f2f'],
+  },
+  dark: {  // 暗色下提亮涨跌/预期/轨迹色，保证暖黑底可读
+    up: '#e05a55', down: '#2fb573', cfl: '#7d8aa0', cna: '#3a3222',
+    accent: '#d19a4a', heading: '#d6c9a8', faint: '#857a63',
+    axis: '#a89d85', split: '#3a3222',
+    tipBg: '#2a2419', tipBorder: '#4a4030', tipText: '#e8dfc8',
+    bookStripe: '#332c1e', bookStripeText: '#d6c9a8',
+    buyExp: '#6b9fe0', sellExp: '#a184e0',
+    volBar: '#7ba3d6', volLine: '#d97d33',
+    tracePalette: ['#6b9fe0', '#e8a35c', '#e05a55', '#2fb573', '#a184e0', '#2ec4b6', '#d97d33', '#9cb85e'],
+  },
+};
+let theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+const T = k => THEMES[theme][k];
+function setTheme(t) {
+  theme = t;
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('dpTheme', t); } catch {}
+  const b = $('#themeBtn'); if (b) b.textContent = t === 'dark' ? '☀️ 亮色' : '🌙 暗色';
+  renderAll();   // canvas 图表不跟随 CSS 变量，必须用新主题表重画
+}
+$('#themeBtn').onclick = () => setTheme(theme === 'dark' ? 'light' : 'dark');
+(function initThemeBtn() { const b = $('#themeBtn'); if (b) b.textContent = theme === 'dark' ? '☀️ 亮色' : '🌙 暗色'; })();
+
+function renderStatus() {
+  const m = state?.meta || {};
+  $('#stMode').textContent = m.mode === 'passive+poll' ? '监听+低频轮询' : '被动监听';
+  $('#stSync').textContent = sseOpen ? '实时推送（平台刷新+0.5s）' : '轮询降级(10s)';
+  $('#stCap').textContent = m.captured ?? 0;
+  $('#stReq').textContent = m.activeRequests ?? 0;
+  $('#stWin').textContent = state?.windows?.length ?? 0;
+  $('#waitCap').textContent = '已被动捕获 ' + (m.captured ?? 0) + ' 个响应';
+  let agoTxt = '-';
+  if (m.lastDataTs) {
+    const sec = Math.round((Date.now() - new Date(m.lastDataTs)) / 1000);
+    agoTxt = sec < 90 ? sec + '秒前' : Math.round(sec / 60) + '分前';
+    $('#dot').className = 'dot' + (sec > 300 ? ' stale' : '');
+    $('#stLast').textContent = hhmm(m.lastDataTs) + '（' + agoTxt + '）';
+  } else { $('#dot').className = 'dot off'; $('#stLast').textContent = '-'; }
+
+  const b = $('#banner');
+  const msgs = [];
+  if (m.sessionExpired) msgs.push('⚠ 会话可能过期（捕获到401）：请在调试 Chrome 里重新登录平台，登录后自动恢复。');
+  if (m.note) msgs.push('⚠ ' + m.note);
+  // 预期价格达标提醒（逐窗口）：最新价 ≤该窗口买入预期 或 ≥该窗口卖出预期
+  const wsAll = state?.windows || [];
+  const hasExp = expect.buy.some(v => v != null) || expect.sell.some(v => v != null);
+  if (wsAll.length && hasExp) {
+    const bh = [], sh = [];
+    wsAll.forEach((w, i) => {
+      if (w.price == null) return;
+      const eb = expect.buy[i], es = expect.sell[i];
+      if (eb != null && w.price <= eb) bh.push(`${scode(w.id)}(${fmt(w.price, 1)}≤预${fmt(eb, 0)})`);
+      if (es != null && w.price >= es) sh.push(`${scode(w.id)}(${fmt(w.price, 1)}≥预${fmt(es, 0)})`);
+    });
+    const short = a => a.slice(0, 5).join('、') + (a.length > 5 ? ` 等${a.length}个` : '');
+    if (bh.length) msgs.push(`🎯 达到买入预期：${short(bh)} —— 可关注买入`);
+    if (sh.length) msgs.push(`🎯 达到卖出预期：${short(sh)} —— 可关注卖出`);
+  }
+  if (m.lastDataTs) {
+    const staleSec = Math.round((Date.now() - new Date(m.lastDataTs)) / 1000);
+    if (staleSec > 300 && (state?.windows?.length || 0) > 0) {
+      msgs.push(`ℹ 数据已 ${Math.round(staleSec / 60)} 分钟未更新——若交易已结束属正常（当前展示最后成交快照，可复盘/导出）；若仍在交易时段，请检查调试 Chrome 的撮合页是否开着且窗口未被最小化（后台窗口会被浏览器节流暂停刷新）。`);
+    }
+  }
+  if (msgs.length) { b.textContent = msgs.join('　'); b.classList.add('show'); } else b.classList.remove('show');
+}
+
+function renderCards() {
+  const ws = windowsSorted();
+  let up = 0, down = 0, flat = 0;
+  for (const w of ws) {
+    const d = deltaOf(w);
+    if (d == null) continue;
+    if (d > 1e-9) up++; else if (d < -1e-9) down++; else flat++;
+  }
+  const withPrice = ws.filter(w => w.price != null);
+  const days = [...new Set(withPrice.map(w => String(w.id).slice(0, 10)))].sort();
+  const dayAvg = days.map(d => {
+    const arr = withPrice.filter(w => String(w.id).startsWith(d));
+    return { d, avg: arr.reduce((s, w) => s + w.price, 0) / arr.length };
+  });
+  let maxUp = null, maxDown = null;
+  for (const w of withPrice) {
+    const base = baseline === 'first' ? w.firstPrice : baseline === 'central' ? (w.extras && w.extras.centralized) : w.prevPrice;
+    if (base == null || base === 0) continue;
+    const pct = (w.price - base) / base * 100;
+    if (!maxUp || pct > maxUp.pct) maxUp = { w, pct };
+    if (!maxDown || pct < maxDown.pct) maxDown = { w, pct };
+  }
+  const cards = [
+    { k: '上涨窗口', v: up, c: T('up') },
+    { k: '下跌窗口', v: down, c: T('down') },
+    { k: '持平窗口', v: flat, c: T('cfl') },
+  ];
+  for (const d of dayAvg) cards.push({ k: d.d + ' 均价', v: fmt(d.avg), c: T('heading') });
+  if (dayAvg.length === 2) {
+    const diff = dayAvg[1].avg - dayAvg[0].avg, pct = diff / dayAvg[0].avg * 100;
+    cards.push({ k: '次日 vs 首日', v: (diff >= 0 ? '+' : '') + fmt(diff), sub: fmt(pct) + '%', c: diff >= 0 ? T('up') : T('down') });
+  }
+  if (maxUp) cards.push({ k: '最大涨幅 ' + scode(maxUp.w.id), v: '+' + fmt(maxUp.pct) + '%', c: T('up') });
+  if (maxDown) cards.push({ k: '最大跌幅 ' + scode(maxDown.w.id), v: fmt(maxDown.pct) + '%', c: T('down') });
+  $('#cards').innerHTML = cards.map(c =>
+    `<div class="card"><div class="k">${c.k}</div><div class="v num" style="color:${c.c}">${c.v}</div>${c.sub ? `<div class="sub num">${c.sub}</div>` : ''}</div>`
+  ).join('');
+}
+
+function tooltipFor(w) {
+  const d = deltaOf(w);
+  const ex = w.extras || {};
+  const wsAll = windowsSorted();
+  const wi = wsAll.indexOf(w);
+  const eb = wi >= 0 ? expect.buy[wi] : null, es = wi >= 0 ? expect.sell[wi] : null;
+  const arrow = d == null ? '' : d > 1e-9 ? '▲' : d < -1e-9 ? '▼' : '—';
+  const cls = d == null ? 'flat' : d > 1e-9 ? 'up' : d < -1e-9 ? 'down' : 'flat';
+  const base = baseline === 'first' ? w.firstPrice : baseline === 'central' ? ex.centralized : w.prevPrice;
+  const hist = (w.history || []).slice(-10).map(h => `${hhmm(h.ts)}  ${fmt(h.price)}${h.volume != null ? ' / ' + fmt(h.volume, 1) : ''}`).join('<br>');
+  return `<b>${dcode(w.id)}</b> <span style="color:${T('axis')}">${w.label || ''}</span><br>
+    最新价：<b class="num">${fmt(w.price)}</b> <span class="${cls}">${arrow}${d != null && base != null ? ' ' + fmt(w.price - base, 2) : ''}</span><br>
+    ${ex.centralized != null ? '集中竞争价：' + fmt(ex.centralized) + '<br>' : ''}
+    ${ex.avg != null ? '成交均价：' + fmt(ex.avg) + '<br>' : ''}
+    ${ex.high != null ? '最高/最低：' + fmt(ex.high) + ' / ' + fmt(ex.low) + '<br>' : ''}
+    ${w.firstPrice != null ? '监控首轮：' + fmt(w.firstPrice) + '<br>' : ''}
+    ${w.volume != null ? '累计成交量：' + fmt(w.volume, 1) + '<br>' : ''}
+    ${eb != null ? '买入预期：' + fmt(eb, 1) + (w.price != null && w.price <= eb ? ' <span class="up">已达标✓</span>' : '') + '<br>' : ''}
+    ${es != null ? '卖出预期：' + fmt(es, 1) + (w.price != null && w.price >= es ? ' <span class="up">已达标✓</span>' : '') + '<br>' : ''}
+    更新：${hhmm(w.lastTs)}<br>
+    ${hist ? `<hr style="border-color:${T('tipBorder')}">变化历史（时间/价/量）：<br>` + hist : ''}`;
+}
+
+// ===== 预期价格模板：48窗口买入/卖出预期（localStorage 持久化） =====
+let expect = { buy: [], sell: [] };   // 按窗口顺序（windowsSorted 下标对齐），元素可为 null
+const EXP_KEY = 'dpExpect48';
+const NUM_RE = /^-?\d+(?:\.\d+)?$/;
+
+function renderExpStatus() {
+  const ws = windowsSorted();
+  const nb = expect.buy.filter(v => v != null).length, ns = expect.sell.filter(v => v != null).length;
+  $('#expStatus').textContent = (nb === 0 && ns === 0) ? '未导入'
+    : !ws.length ? `已导入 ${nb + ns} 个预期值（窗口数据到达后自动对齐）`
+    : `已导入：买入 ${nb}/${ws.length} · 卖出 ${ns}/${ws.length}（按窗口时间顺序对齐）`;
+}
+function loadExpect() {
+  try { const j = JSON.parse(localStorage.getItem(EXP_KEY)); if (j && Array.isArray(j.buy)) expect = j; } catch {}
+  renderExpStatus();
+}
+function saveExpectImport(silent) {
+  const mode = $('#expMode').value;
+  const buys = [], sells = [];
+  for (const ln of $('#expText').value.split(/\r?\n/)) {
+    if (ln.trim().startsWith('#')) continue;
+    const cols = ln.trim().split(/[\t,;，；]+|\s+/).filter(Boolean);
+    if (!cols.length) continue;
+    const nums = cols.filter(c => NUM_RE.test(c));          // 只认可完整数字的列（时段/代码列自动排除）
+    if (nums.length >= 2) {                                  // 取最后两列价格
+      const a = parseFloat(nums[nums.length - 2]), b = parseFloat(nums[nums.length - 1]);
+      if (mode === 'sb') { buys.push(b); sells.push(a); } else { buys.push(a); sells.push(b); }
+    } else if (nums.length === 1) {
+      const v = parseFloat(nums[0]);
+      if (mode === 's') { sells.push(v); } else { buys.push(v); }   // 单列默认买入
+    } // 0个数字 = 表头行，跳过
+  }
+  if (!buys.length && !sells.length) {
+    if (!silent) alert('未解析到有效价格行，请检查粘贴内容（每行需含数字价格）');
+    return false;
+  }
+  expect.buy = buys; expect.sell = sells;
+  try { localStorage.setItem(EXP_KEY, JSON.stringify(expect)); } catch {}
+  renderExpStatus();
+  renderAll();
+  return true;
+}
+$('#expSave').onclick = () => saveExpectImport(false);
+$('#expClear').onclick = () => {
+  expect = { buy: [], sell: [] };
+  try { localStorage.removeItem(EXP_KEY); } catch {}
+  $('#expText').value = '';
+  renderExpStatus(); renderAll();
+};
+// 模板文件读取：工作区的 预期价格模板.txt（monitor 提供 /api/expect）
+async function loadExpectFromFile(silent) {
+  try {
+    const r = await fetch('/api/expect', { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.ok) { if (!silent) $('#expStatus').textContent = '未找到模板文件（工作区：预期价格模板.xlsx）'; return; }
+    const hasNum = j.text.split(/\r?\n/).some(l => !l.trim().startsWith('#') && l.trim().split(/[\t,;，；]+|\s+/).some(c => NUM_RE.test(c)));
+    if (!hasNum) { if (!silent) $('#expStatus').textContent = '模板文件还没有价格数据（编辑 预期价格模板.xlsx 填入B/C列后再读取）'; return; }
+    $('#expText').value = j.text;
+    if (saveExpectImport(true)) $('#expStatus').textContent = '📂 已从模板文件读取 · ' + $('#expStatus').textContent;
+  } catch (e) {
+    if (!silent) $('#expStatus').textContent = '读取失败：看板服务未连接';
+  }
+}
+$('#expFile').onclick = () => loadExpectFromFile(false);
+
+function renderMain() {
+  if (!chartsReady) return;
+  const ws = windowsSorted();
+  const hasBuy = expect.buy.some(v => v != null), hasSell = expect.sell.some(v => v != null);
+  charts.mainChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 46, right: 8, top: 22, bottom: 28 },
+    legend: (hasBuy || hasSell) ? { data: [...(hasBuy ? ['买入预期'] : []), ...(hasSell ? ['卖出预期'] : [])],
+      textStyle: { color: T('axis'), fontSize: 10 }, top: 0, itemWidth: 14, itemHeight: 8 } : undefined,
+    tooltip: { trigger: 'item', formatter: p => tooltipFor(ws[p.dataIndex]), backgroundColor: T('tipBg'), borderColor: T('tipBorder'), textStyle: { color: T('tipText'), fontSize: 12 } },
+    xAxis: { type: 'category', data: ws.map(w => scode(w.id)),
+      axisLabel: { interval: 2, color: T('axis'), fontSize: 10 } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: T('axis'), fontSize: 10 }, splitLine: { lineStyle: { color: T('split') } } },
+    series: [{
+      type: 'bar', barMaxWidth: 18,
+      label: { show: true, position: 'top', color: T('axis'), fontSize: 8, formatter: p => {
+        const w = ws[p.dataIndex], d = deltaOf(w);
+        return d == null || Math.abs(d) < 1e-9 ? '' : (d > 0 ? '▲' : '▼');
+      }},
+      data: ws.map((w, i) => {
+        const d = deltaOf(w);
+        const sel = bookSel === w.id;
+        const eb = expect.buy[i], es = expect.sell[i];
+        const hitBuy = eb != null && w.price != null && w.price <= eb;
+        const hitSell = es != null && w.price != null && w.price >= es;
+        return { value: w.price,
+          itemStyle: { color: d == null ? T('cna') : d > 1e-9 ? T('up') : d < -1e-9 ? T('down') : T('cfl'), borderRadius: [2, 2, 0, 0],
+            borderColor: sel ? T('accent') : hitBuy ? T('buyExp') : hitSell ? T('sellExp') : undefined,
+            borderWidth: sel ? 2.5 : (hitBuy || hitSell) ? 2 : 0,
+            shadowBlur: sel ? 6 : 0, shadowColor: T('accent') },
+          cursor: 'pointer' };
+      }),
+    },
+    ...(expect.buy.some(v => v != null) ? [{
+      name: '买入预期', type: 'line', data: ws.map((w, i) => expect.buy[i] ?? null),
+      symbol: 'circle', symbolSize: 3, connectNulls: false,
+      lineStyle: { color: T('buyExp'), width: 1.5, type: 'dashed' }, itemStyle: { color: T('buyExp') },
+    }] : []),
+    ...(expect.sell.some(v => v != null) ? [{
+      name: '卖出预期', type: 'line', data: ws.map((w, i) => expect.sell[i] ?? null),
+      symbol: 'circle', symbolSize: 3, connectNulls: false,
+      lineStyle: { color: T('sellExp'), width: 1.5, type: 'dashed' }, itemStyle: { color: T('sellExp') },
+    }] : [])],
+  }, true);
+}
+
+function renderVol() {
+  if (!chartsReady) return;
+  const ws = windowsSorted().filter(w => w.volume != null || w.price != null);
+  charts.volChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 46, right: 46, top: 22, bottom: 28 },
+    tooltip: { trigger: 'axis', backgroundColor: T('tipBg'), borderColor: T('tipBorder'), textStyle: { color: T('tipText'), fontSize: 12 } },
+    legend: { data: ['成交量', '价格'], textStyle: { color: T('axis') }, top: 0 },
+    xAxis: { type: 'category', data: ws.map(w => scode(w.id)), axisLabel: { interval: 2, color: T('axis'), fontSize: 10 } },
+    yAxis: [
+      { type: 'value', name: '成交量', nameTextStyle: { color: T('axis') }, axisLabel: { color: T('axis') }, splitLine: { lineStyle: { color: T('split') } } },
+      { type: 'value', name: '价格', scale: true, nameTextStyle: { color: T('axis') }, axisLabel: { color: T('axis') }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '成交量', type: 'bar', barMaxWidth: 16, itemStyle: { color: T('volBar'), borderRadius: [2, 2, 0, 0] }, data: ws.map(w => w.volume) },
+      { name: '价格', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { color: T('volLine'), width: 2 }, data: ws.map(w => w.price) },
+    ],
+  }, true);
+}
+
+function renderBook() {
+  const trades = state?.meta?.newTrades || [];
+  let book = null, title = '';
+  if (bookSel && bookData) {
+    book = bookData;
+    title = `${scode(bookSel)} · ${hhmm(bookData.ts)} · ${bookData.source || ''}`;
+  } else if (state?.meta?.book && ((state.meta.book.buys || []).length || (state.meta.book.sells || []).length)) {
+    book = state.meta.book;
+    title = (book.code ? scode(book.code) + ' · ' : '') + '平台页当前窗口（被动联动）· ' + hhmm(book.ts);
+  }
+  if (bookLoading) title = '加载中… ' + title;
+  if (!bookSel) title = '点全景图柱子查看对应窗口';
+  $('#bookPanel').classList.toggle('hidden', !book);
+  $('#tradePanel').classList.toggle('hidden', !trades.length);
+  $('#bookTitle').textContent = title;
+  const hasBook = book && ((book.buys || []).length || (book.sells || []).length);
+  if (hasBook) {
+    // 平台样式：全表按价格降序，供应(卖)在上 标"供应N"(5→1)，需求(买)在下 标"需求N"(1→5)，绿卖红买
+    const sells = (book.sells || []).slice();           // 解析层已按价格降序
+    const buys = (book.buys || []).slice();             // 降序（最高买价在前）
+    const rows = [];
+    sells.forEach((s, i) => rows.push(
+      `<tr><td class="down">供应${sells.length - i}</td><td class="num down">${fmt(s.price)}</td><td class="num down">${fmt(s.qty, 1)}</td></tr>`));
+    // 价差行：最低供应价 - 最高需求价
+    const lowestSell = sells.length ? sells[sells.length - 1].price : null;
+    const highestBuy = buys.length ? buys[0].price : null;
+    if (lowestSell != null && highestBuy != null) rows.push(
+      `<tr style="background:${T('bookStripe')}"><td style="color:${T('bookStripeText')};font-weight:600">价差</td><td class="num" style="color:${T('bookStripeText')};font-weight:600">${fmt(lowestSell - highestBuy)}</td><td></td></tr>`);
+    buys.forEach((b, i) => rows.push(
+      `<tr><td class="up">需求${i + 1}</td><td class="num up">${fmt(b.price)}</td><td class="num up">${fmt(b.qty, 1)}</td></tr>`));
+    $('#bookLadder').innerHTML =
+      (bookSel ? `<div style="font-size:12px;color:var(--accent);margin-bottom:4px;font-weight:600">${dcode(bookSel)}</div>` : '') +
+      '<table style="width:100%"><thead><tr><th style="text-align:left">档位</th><th>价格</th><th>电量</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>' +
+      (bookErr ? `<div style="color:var(--up);font-size:12px;margin-top:6px">${bookErr}</div>` : '');
+  } else {
+    $('#bookLadder').innerHTML = bookErr
+      ? `<div style="color:var(--up);font-size:12px">${bookErr}</div>`
+      : (bookSel ? '<div style="color:var(--muted);font-size:12px">该窗口暂无盘口数据</div>' : '');
+  }
+  $('#tradeTbl tbody').innerHTML = trades.slice(0, 3).map(t =>
+    `<tr><td class="num">${String(t.matchTime || '').slice(11, 19)}</td><td>${t.window || t.code}</td><td class="num">${fmt(t.price)}</td><td class="num">${fmt(t.energy, 1)}</td></tr>`
+  ).join('');
+}
+
+// 点击全景图窗口 → 按需查询该窗口买卖五档（monitor 侧有 ≥2s 节流 + 10s 缓存）
+let bookSel = null, bookData = null, bookLoading = false, bookErr = '';
+async function loadBook(id, force) {
+  if (!id) return;
+  bookSel = id; bookErr = ''; bookLoading = true; renderBook();
+  try {
+    const r = await fetch(`/api/book?code=${dcode(id)}${force ? '&fresh=1' : ''}`, { cache: 'no-store' });
+    const j = await r.json();
+    if (j.ok) { bookData = { buys: j.buys, sells: j.sells, ts: j.ts, source: j.source }; }
+    else bookErr = j.err || '获取失败';
+  } catch (e) { bookErr = '看板服务未连接'; }
+  bookLoading = false; renderBook();
+}
+
+// ===== 预期满足监控：重点窗口巡检（后端按间隔查五档，前端对照预期价判定） =====
+const patrolSel = new Set();
+const patrolCfg = () => (state && state.meta && state.meta.patrol) || { enabled: false, codes: [], intervalMin: 5, results: {}, lastRoundTs: null, pausedReason: '' };
+
+async function patrolSave(patch) {
+  try {
+    const r = await fetch('/api/patrol', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes: [...patrolSel], intervalMin: +$('#patrolInterval').value, ...patch }),
+    });
+    const j = await r.json();
+    if (j.ok && state) { state.meta.patrol = j.patrol; renderPatrol(); }
+  } catch (e) { /* 看板服务未连接时静默，状态栏已有提示 */ }
+}
+
+// 满足度判定（基于五档可见范围）：
+//   买入：可吃量=卖方申报中价≤买入预期的量；竞争量=买方申报中价>预期的量；可吃=0 表示卖一价高于预期
+//   卖出：可吃量=买方申报中价≥卖出预期的量；竞争量=卖方申报中价<预期的量
+function judgePatrol(book, pb, ps) {
+  const F = (arr, cond) => (arr || []).filter(cond).reduce((a, x) => a + x.qty, 0);
+  const minSell = (book.sells || []).length ? Math.min(...book.sells.map(s => s.price)) : null;
+  const maxBuy = (book.buys || []).length ? Math.max(...book.buys.map(b => b.price)) : null;
+  let jb = { t: '未设预期' };
+  if (pb != null) {
+    const eat = F(book.sells, s => s.price <= pb), comp = F(book.buys, b => b.price > pb);
+    jb = eat <= 0 ? { t: `❌ 卖一 ${fmt(minSell, 1)} 高于预期，暂无可吃量` }
+      : eat >= comp ? { t: `✅ 可吃 ${eat.toFixed(1)} ≥ 竞争 ${comp.toFixed(1)}` }
+      : { t: `⚠️ 可吃 ${eat.toFixed(1)} ＜ 竞争 ${comp.toFixed(1)}` };
+  }
+  let js = { t: '未设预期' };
+  if (ps != null) {
+    const eat = F(book.buys, b => b.price >= ps), comp = F(book.sells, s => s.price < ps);
+    js = eat <= 0 ? { t: `❌ 买一 ${fmt(maxBuy, 1)} 低于预期，暂无对手量` }
+      : eat >= comp ? { t: `✅ 可吃 ${eat.toFixed(1)} ≥ 竞争 ${comp.toFixed(1)}` }
+      : { t: `⚠️ 可吃 ${eat.toFixed(1)} ＜ 竞争 ${comp.toFixed(1)}` };
+  }
+  return { jb, js };
+}
+
+function renderPatrol() {
+  const cfg = patrolCfg();
+  const ws = windowsSorted();
+  const valid = new Set(ws.map(w => dcode(w.id)));
+  if (!patrolSel.size && cfg.codes.length) cfg.codes.forEach(c => patrolSel.add(c));   // 首次从后端同步
+  [...patrolSel].forEach(c => { if (!valid.has(c)) patrolSel.delete(c); });            // 标的变化后清失效 code
+  const btn = $('#patrolToggle');
+  btn.textContent = cfg.enabled ? '停止监控' : '开启监控';
+  btn.classList.toggle('primary', !cfg.enabled);
+  if ($('#patrolInterval').value != String(cfg.intervalMin || 5)) $('#patrolInterval').value = String(cfg.intervalMin || 5);
+  $('#patrolCount').textContent = patrolSel.size;
+
+  const grid = $('#patrolGrid');
+  grid.innerHTML = ws.map(w => `<span class="wcell${patrolSel.has(dcode(w.id)) ? ' on' : ''}" data-code="${dcode(w.id)}">${scode(w.id)}</span>`).join('');
+  grid.querySelectorAll('.wcell').forEach(el => el.onclick = () => {
+    const c = el.dataset.code;
+    patrolSel.has(c) ? patrolSel.delete(c) : patrolSel.add(c);
+    el.classList.toggle('on');
+    $('#patrolCount').textContent = patrolSel.size;
+    patrolSave({});
+  });
+
+  const st = [cfg.enabled ? `已开启 · 间隔 ${cfg.intervalMin} 分钟` : '未开启'];
+  if (cfg.lastRoundTs) st.push('上轮 ' + hhmm(cfg.lastRoundTs));
+  if (cfg.pausedReason) st.push('⚠ ' + cfg.pausedReason);
+  $('#patrolStatus').textContent = st.join(' · ');
+
+  const tb = $('#patrolTbl tbody');
+  const rows = [...patrolSel].sort().map(code => {
+    const wi = ws.findIndex(x => dcode(x.id) === code);
+    const w = wi >= 0 ? ws[wi] : null;
+    const pb = wi >= 0 ? expect.buy[wi] : null, ps = wi >= 0 ? expect.sell[wi] : null;
+    const book = cfg.results && cfg.results[code];
+    const j = book ? judgePatrol(book, pb, ps) : { jb: { t: '待巡检' }, js: { t: '待巡检' } };
+    return `<tr><td class="num">${code}</td><td class="num">${w ? fmt(w.price) : '-'}</td>
+      <td style="text-align:left">${pb != null ? `<span style="color:var(--muted)">预期${fmt(pb, 0)}：</span>` : ''}${j.jb.t}</td>
+      <td style="text-align:left">${ps != null ? `<span style="color:var(--muted)">预期${fmt(ps, 0)}：</span>` : ''}${j.js.t}</td>
+      <td class="num">${book ? hhmm(book.ts) : '-'}</td></tr>`;
+  });
+  tb.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted)">点击上方窗口标签，选定要巡检的重点窗口</td></tr>';
+}
+$('#patrolToggle').onclick = () => patrolSave({ enabled: !patrolCfg().enabled });
+$('#patrolInterval').onchange = () => patrolSave({});
+
+function renderWGrid() {
+  const ws = windowsSorted();
+  const grid = $('#wgrid');
+  const ids = new Set(ws.map(w => w.id));
+  for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
+  grid.innerHTML = ws.map(w => `<span class="wcell${selected.has(w.id) ? ' on' : ''}" data-id="${w.id}">${scode(w.id)}</span>`).join('');
+  grid.querySelectorAll('.wcell').forEach(el => el.onclick = () => {
+    const id = el.dataset.id;
+    selected.has(id) ? selected.delete(id) : selected.add(id);
+    el.classList.toggle('on');
+    renderTrace();
+  });
+}
+
+function renderTrace() {
+  if (!chartsReady) return;
+  const ws = windowsSorted().filter(w => selected.has(w.id));
+  const palette = T('tracePalette');
+  const names = ws.map(w => scode(w.id));
+  charts.traceChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 56, right: 20, top: 30, bottom: 40 },
+    tooltip: { trigger: 'axis', backgroundColor: T('tipBg'), borderColor: T('tipBorder'), textStyle: { color: T('tipText'), fontSize: 12 } },
+    legend: { type: 'scroll', textStyle: { color: T('axis'), fontSize: 10 }, top: 0, data: names },
+    xAxis: { type: 'time', axisLabel: { color: T('axis'), formatter: v => echarts.time.format(v, '{HH}:{mm}', false) } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: T('axis') }, splitLine: { lineStyle: { color: T('split') } } },
+    series: ws.map((w, i) => ({
+      name: names[i], type: 'line', symbol: 'circle', symbolSize: 4, showSymbol: false,
+      lineStyle: { width: 1.8 }, color: palette[i % palette.length],
+      data: (w.history || []).map(h => [h.ts, h.price]),
+      endLabel: { show: true, formatter: () => fmt(w.price), color: palette[i % palette.length], fontSize: 10 },
+    })),
+    graphic: ws.length ? [] : [{ type: 'text', left: 'center', top: 'middle', style: { text: '点击上方窗口标签选择要回放的时段', fill: T('faint'), fontSize: 13 } }],
+  }, true);
+}
+
+function renderTable() {
+  const ws = windowsSorted();
+  const thead = $('#thead'); const tb = $('#tbl tbody');
+  thead.innerHTML = ['交易代码', '时段', '最新价', '较上次', '较集中竞争', '均价', '最高', '最低', '集中竞争价', '成交量', '更新时间'].map(t => `<th>${t}</th>`).join('');
+  tb.innerHTML = ws.map(w => {
+    const d = deltaOf(w);
+    const cls = d == null ? 'flat' : d > 1e-9 ? 'up' : d < -1e-9 ? 'down' : 'flat';
+    const arrow = d == null ? '' : d > 1e-9 ? '▲' : d < -1e-9 ? '▼' : '—';
+    const ex = w.extras || {};
+    const dc = ex.centralized != null && w.price != null ? w.price - ex.centralized : null;
+    return `<tr>
+      <td class="num">${dcode(w.id)}</td><td>${w.label || ''}</td>
+      <td class="num"><b>${fmt(w.price)}</b></td>
+      <td class="num ${cls}">${arrow}${d != null ? ' ' + fmt(d) : '-'}</td>
+      <td class="num ${dc == null ? '' : dc > 1e-9 ? 'up' : dc < -1e-9 ? 'down' : 'flat'}">${dc == null ? '-' : (dc > 0 ? '+' : '') + fmt(dc)}</td>
+      <td class="num">${fmt(ex.avg)}</td>
+      <td class="num">${fmt(ex.high)}</td>
+      <td class="num">${fmt(ex.low)}</td>
+      <td class="num">${fmt(ex.centralized)}</td>
+      <td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td>
+      <td class="num">${hhmm(w.lastTs)}</td></tr>`;
+  }).join('');
+}
+
+function exportCsv() {
+  const ws = windowsSorted();
+  const head = ['交易代码', '时段', '最新价', '较上次', '较集中竞争', '均价', '最高', '最低', '集中竞争价', '累计成交量', '最后更新', '价格轨迹(时间:价)'];
+  const rows = ws.map(w => {
+    const ex = w.extras || {};
+    const dc = ex.centralized != null && w.price != null ? fmt(w.price - ex.centralized) : '';
+    return [dcode(w.id), w.label || '', fmt(w.price),
+      deltaOf(w) != null ? fmt(deltaOf(w)) : '', dc,
+      fmt(ex.avg), fmt(ex.high), fmt(ex.low), fmt(ex.centralized),
+      w.volume != null ? fmt(w.volume, 1) : '', bjFull(w.lastTs),
+      (w.history || []).map(h => hhmm(h.ts) + ':' + fmt(h.price)).join(' '),
+    ];
+  });
+  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = '滚动撮合窗口_' + new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-') + '.csv';
+  a.click();
+}
+
+// 图表只在容器真正可见后初始化（隐藏容器上 init 会得到 0x0 尺寸，导致塌陷/空白）
+function ensureCharts() {
+  if (chartsReady) return;
+  const el = document.getElementById('mainChart');
+  if (!el || !el.clientWidth) return;
+  for (const id of ['mainChart', 'volChart', 'traceChart']) {
+    charts[id] = echarts.init(document.getElementById(id));
+  }
+  charts.mainChart.on('click', p => {
+    const w = windowsSorted()[p.dataIndex];
+    if (w) loadBook(w.id);
+  });
+  const ro = new ResizeObserver(entries => entries.forEach(e => {
+    const c = charts[e.target.id]; if (c) c.resize();
+  }));
+  ['mainChart', 'volChart', 'traceChart'].forEach(id => ro.observe(document.getElementById(id)));
+  window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+  chartsReady = true;
+}
+
+function renderAll() {
+  const has = (state?.windows || []).length > 0;
+  $('#waiting').classList.toggle('hidden', has);
+  $('#main').classList.toggle('hidden', !has);
+  renderStatus();
+  if (!has) return;
+  ensureCharts();
+  renderCards(); renderMain(); renderVol(); renderBook(); renderWGrid(); renderTrace(); renderTable(); renderPatrol();
+}
+
+document.querySelectorAll('input[name=base]').forEach(r => r.onchange = () => { baseline = r.value; renderAll(); });
+document.querySelectorAll('[data-sel]').forEach(b => b.onclick = () => {
+  const ws = windowsSorted();
+  const days = [...new Set(ws.map(w => String(w.id).slice(0, 10)))].sort();
+  if (b.dataset.sel === 'all') ws.forEach(w => selected.add(w.id));
+  if (b.dataset.sel === 'none') selected.clear();
+  if (b.dataset.sel === 'day1' && days[0]) { selected.clear(); ws.filter(w => String(w.id).startsWith(days[0])).forEach(w => selected.add(w.id)); }
+  if (b.dataset.sel === 'day2' && days[1]) { selected.clear(); ws.filter(w => String(w.id).startsWith(days[1])).forEach(w => selected.add(w.id)); }
+  if (b.dataset.sel === 'movers') {
+    selected.clear();
+    windowsSorted()
+      .filter(w => deltaOf(w) != null && Math.abs(deltaOf(w)) > 1e-9)
+      .sort((a, b2) => Math.abs(deltaOf(b2)) - Math.abs(deltaOf(a)))
+      .slice(0, 6).forEach(w => selected.add(w.id));
+  }
+  renderWGrid(); renderTrace();
+});
+$('#btnCsv').onclick = exportCsv;
+$('#bookRefresh').onclick = () => { if (bookSel) loadBook(bookSel, true); };
+
+async function tick() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    state = await r.json();
+    renderAll();
+  } catch (e) {
+    sseOpen = false;
+    $('#dot').className = 'dot off';
+    $('#stMode').textContent = '看板服务未连接';
+  }
+}
+
+// 实时推送：平台页面刷新（~5.2s/次）→ 服务端 +0.5s 推送；SSE 断开时自动重连并降级轮询
+let sse = null, sseOpen = false;
+function connectSSE() {
+  sse = new EventSource('/api/stream');
+  sse.onopen = () => { sseOpen = true; renderStatus(); };
+  sse.onmessage = ev => {
+    try { state = JSON.parse(ev.data); renderAll(); } catch (e) {}
+  };
+  sse.onerror = () => { sseOpen = false; renderStatus(); };
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !sseOpen) tick(); });
+loadExpect();
+loadExpectFromFile(true);   // 启动时自动尝试读取模板文件（有数据则优先于浏览器缓存）
+tick();
+connectSSE();
+setInterval(() => { if (!document.hidden && !sseOpen) tick(); }, 10000);
+// 数据停更时也按时让"10分钟彩色"到期退灰（每30秒重算一次渲染）
+setInterval(() => { if (!document.hidden && state && state.windows && state.windows.length) renderAll(); }, 30000);
+</script>
+</body>
+</html>

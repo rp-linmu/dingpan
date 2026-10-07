@@ -1,0 +1,19 @@
+# 运行数据与个人文件（绝不上传）
+data/
+dingpan-chrome-profile/
+dingpan-edge-profile/
+预期价格模板.xlsx
+state_backup*.json
+
+# 本地 AI 辅助与内部记录
+mcp-server.mjs
+.ai-memory/
+.zcode/
+article/
+design/
+
+# 分发包与临时产物
+*.zip
+expect-blank.xlsx.bak
+node_modules/
+*.log
