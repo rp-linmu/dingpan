@@ -134,6 +134,13 @@
     <div style="margin-top:6px"><button id="expSave" class="primary">导入并应用</button></div>
   </div>
 
+  <div class="panel" id="historyCatchPanel" style="display:none">
+    <h2>📥 检测到历史交易窗口数据
+      <span style="font-weight:400;color:var(--muted);font-size:12px">在平台上查看的历史场次，可保存留档（数据来自页面自身响应，零额外请求）</span>
+    </h2>
+    <div id="historyCatchList"></div>
+  </div>
+
   <div class="panel" id="patrolPanel">
     <h2>🎯 预期满足监控（重点窗口巡检）
       <span class="toolbar" style="gap:10px">
@@ -220,6 +227,21 @@
     <div class="tbl-wrap"><table id="tbl">
       <thead><tr id="thead"></tr></thead>
       <tbody></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel" id="historyPanel">
+    <h2>📁 历史场次数据
+      <span class="toolbar" style="gap:8px">
+        <select id="histSel" style="background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;color:var(--text);font-size:12px"><option value="">（无已保存场次）</option></select>
+        <button id="histView">查看</button>
+        <button id="histRefresh">刷新列表</button>
+        <button id="histCsv" class="primary">导出 CSV</button>
+      </span>
+    </h2>
+    <div class="tbl-wrap" style="max-height:360px"><table id="histTbl">
+      <thead><tr><th style="text-align:left">交易代码</th><th style="text-align:left">时段</th><th>最新价</th><th>均价</th><th>最高</th><th>最低</th><th>集中竞争价</th><th>成交量</th></tr></thead>
+      <tbody><tr><td colspan="8" style="text-align:center;color:var(--muted)">选择上方场次后点「查看」——在平台页查看历史交易窗口时，顶部会提示保存为场次</td></tr></tbody>
     </table></div>
   </div>
 </div>
@@ -672,6 +694,101 @@ function renderPatrol() {
 $('#patrolToggle').onclick = () => patrolSave({ enabled: !patrolCfg().enabled });
 $('#patrolInterval').onchange = () => patrolSave({});
 
+// ===== 历史场次：查看历史交易窗口时提示保存为场次文件，随时查看/导出（纯被动数据） =====
+let histCur = null;   // 当前查看的已保存场次
+
+function renderHistoryCatch() {
+  const hc = (state && state.meta && state.meta.historyCatch) || {};
+  const keys = Object.keys(hc);
+  const panel = $('#historyCatchPanel');
+  panel.style.display = keys.length ? '' : 'none';
+  if (!keys.length) return;
+  $('#historyCatchList').innerHTML = keys.map(k => {
+    const c = hc[k];
+    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <b class="num">${k}</b>
+      <span style="color:var(--muted);font-size:12px">${c.windows.length} 窗口 · ${c.days.join('、')} · 捕获于 ${hhmm(c.ts)}</span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button class="primary" data-save="${k}">保存为场次</button>
+        <button data-dismiss="${k}">忽略</button>
+      </span></div>`;
+  }).join('');
+  panel.querySelectorAll('[data-save]').forEach(b => b.onclick = async () => {
+    const c = hc[b.dataset.save];
+    if (!c) return;
+    try {
+      const r = await fetch('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'save', key: c.key, days: c.days, windows: c.windows, newTrades: c.newTrades }) });
+      const j = await r.json();
+      if (!j.ok) { alert('保存失败：' + j.err); return; }
+      loadHistoryList();
+    } catch (e) { alert('保存失败：看板服务未连接'); }
+  });
+  panel.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = async () => {
+    try {
+      await fetch('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'dismiss', key: b.dataset.dismiss }) });
+      if (state && state.meta && state.meta.historyCatch) { delete state.meta.historyCatch[b.dataset.dismiss]; renderHistoryCatch(); }
+    } catch {}
+  });
+}
+
+async function loadHistoryList(keepSel) {
+  try {
+    const r = await fetch('/api/history/list', { cache: 'no-store' });
+    const j = await r.json();
+    const sel = $('#histSel');
+    const cur = keepSel ? sel.value : '';
+    sel.innerHTML = (j.list || []).length
+      ? j.list.map(s => `<option value="${s.file}">${s.key}（${s.windowCount}窗 · ${bjFull(s.savedAt).slice(5, 16)}）</option>`).join('')
+      : '<option value="">（无已保存场次）</option>';
+    if (cur && (j.list || []).some(s => s.file === cur)) sel.value = cur;
+  } catch {}
+}
+
+async function showHistory() {
+  const f = $('#histSel').value;
+  if (!f) { histCur = null; return; }
+  try {
+    const r = await fetch('/api/history/get?file=' + encodeURIComponent(f), { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.ok) { alert('读取失败：' + j.err); return; }
+    histCur = { ...j.session, file: f };
+    renderHistoryTbl();
+  } catch (e) { alert('读取失败：看板服务未连接'); }
+}
+
+function renderHistoryTbl() {
+  const tb = $('#histTbl tbody');
+  if (!histCur) {
+    tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted)">选择上方场次后点「查看」——在平台页查看历史交易窗口时，顶部会提示保存为场次</td></tr>';
+    return;
+  }
+  tb.innerHTML = histCur.windows.slice().sort((a, b) => String(a.id).localeCompare(String(b.id), 'zh-CN', { numeric: true })).map(w => {
+    const ex = w.extras || {};
+    return `<tr><td class="num">${dcode(w.id)}</td><td>${w.label || ''}</td><td class="num"><b>${fmt(w.price)}</b></td>
+      <td class="num">${fmt(ex.avg)}</td><td class="num">${fmt(ex.high)}</td><td class="num">${fmt(ex.low)}</td>
+      <td class="num">${fmt(ex.centralized)}</td><td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td></tr>`;
+  }).join('');
+}
+
+function exportHistoryCsv() {
+  if (!histCur) { alert('请先选择并查看一个场次'); return; }
+  const head = ['交易代码', '时段', '最新价', '均价', '最高', '最低', '集中竞争价', '累计成交量'];
+  const rows = histCur.windows.slice().sort((a, b) => String(a.id).localeCompare(String(b.id), 'zh-CN', { numeric: true })).map(w => {
+    const ex = w.extras || {};
+    return [dcode(w.id), w.label || '', fmt(w.price), fmt(ex.avg), fmt(ex.high), fmt(ex.low), fmt(ex.centralized), w.volume != null ? fmt(w.volume, 1) : ''];
+  });
+  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `场次_${histCur.key}.csv`;
+  a.click();
+}
+$('#histView').onclick = showHistory;
+$('#histRefresh').onclick = () => loadHistoryList(true);
+$('#histCsv').onclick = exportHistoryCsv;
+
 function renderWGrid() {
   const ws = windowsSorted();
   const grid = $('#wgrid');
@@ -779,7 +896,7 @@ function renderAll() {
   renderStatus();
   if (!has) return;
   ensureCharts();
-  renderCards(); renderMain(); renderVol(); renderBook(); renderWGrid(); renderTrace(); renderTable(); renderPatrol();
+  renderCards(); renderMain(); renderVol(); renderBook(); renderWGrid(); renderTrace(); renderTable(); renderPatrol(); renderHistoryCatch();
 }
 
 document.querySelectorAll('input[name=base]').forEach(r => r.onchange = () => { baseline = r.value; renderAll(); });
@@ -828,6 +945,7 @@ function connectSSE() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !sseOpen) tick(); });
 loadExpect();
 loadExpectFromFile(true);   // 启动时自动尝试读取模板文件（有数据则优先于浏览器缓存）
+loadHistoryList();          // 启动时拉取已保存的历史场次列表
 tick();
 connectSSE();
 setInterval(() => { if (!document.hidden && !sseOpen) tick(); }, 10000);

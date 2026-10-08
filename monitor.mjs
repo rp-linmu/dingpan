@@ -244,6 +244,8 @@ const state = {
     endpoints: [],
     // 预期满足监控（重点窗口巡检）：用户选定窗口 + 分钟级间隔，后端定时查五档（走 getBook 节流/缓存/页面上下文）
     patrol: { enabled: false, codes: [], intervalMin: 5, lastRoundTs: null, results: {}, failures: 0, pausedReason: '' },
+    // 历史场次捕获：查看历史交易窗口时被过滤的场次数据暂存于此（key=场次日期串），看板提示是否保存
+    historyCatch: {},
   },
   windows: [],   // [{id,label,unit,price,prevPrice,firstPrice,volume,history:[{ts,price,volume}],bidAsk,lastTs}]
   orderBook: [], // 如有独立盘口数据
@@ -264,6 +266,7 @@ function archiveState(reason) {
   pendingInit = pendingSwitch = null;   // 标的边界确认状态一并复位
   // 巡检设置随标的重置（窗口代码已属旧标的），间隔偏好保留
   state.meta.patrol = { ...state.meta.patrol, enabled: false, codes: [], results: {}, failures: 0, pausedReason: '' };
+  state.meta.historyCatch = {};   // 待处理历史场次一并清空
 }
 
 function loadState() {
@@ -281,6 +284,7 @@ function loadState() {
       // 巡检设置兼容与运行态复位：旧版本 state 无 patrol 字段；设置保留，结果清空重巡
       if (!state.meta.patrol) state.meta.patrol = { enabled: false, codes: [], intervalMin: 5, lastRoundTs: null, results: {}, failures: 0, pausedReason: '' };
       state.meta.patrol = { ...state.meta.patrol, results: {}, failures: 0, pausedReason: '' };
+      state.meta.historyCatch = {};   // 运行态：重启后重新捕获
       // 注：历史窗口混入的存量残留不在此处清理（标的跨度可变，无法按天数判定）——
       // 增量防御在 mergeUpdate（历史日期进不来），残留由跨交易日归档自然清掉
     } catch {}
@@ -399,6 +403,21 @@ let pendingSwitch = null;  // {days:Set} 换标的待确认的日期集
 
 const dayOf = w => String(w.id).slice(0, 10);
 
+// 历史场次捕获：页面查看"历史交易窗口"时，被防污染过滤掉的场次数据先缓存于此（纯被动，数据来自页面自己的响应）。
+// 看板会提示"是否保存为场次"，保存后写入 data/场次_<日期范围>.json，可随时查看/导出。
+// 同一场次重复到达时刷新覆盖；最多暂存 5 个待处理场次（最旧的丢弃），防止长期停留在历史页导致内存膨胀。
+function catchHistory(histWindows, upd, wallTs) {
+  const days = [...new Set(histWindows.map(dayOf))].sort();
+  const key = 'D' + days[0].replace(/-/g, '') + (days.length > 1 ? '-' + days[days.length - 1].replace(/-/g, '') : '');
+  const hc = state.meta.historyCatch;
+  hc[key] = { key, days, windows: histWindows, newTrades: upd.newTrades || null, ts: new Date(wallTs * 1000).toISOString() };
+  const keys = Object.keys(hc);
+  if (keys.length > 5) {
+    keys.sort((a, b) => (hc[a].ts < hc[b].ts ? -1 : 1));
+    delete hc[keys[0]];
+  }
+}
+
 function mergeUpdate(upd, wallTs) {
   // upd: {windows:[{id,label,price,volume,extras}], book?, newTrades?}
   if (!upd || !Array.isArray(upd.windows) || !upd.windows.length) return;
@@ -427,7 +446,9 @@ function mergeUpdate(upd, wallTs) {
       else { pendingSwitch = { days: new Set(newerDays) }; return; }
     } else {
       pendingSwitch = null;
-      // 只合并当前标的日期内的窗口（挡住查看历史交易窗口时混入的更旧日期）
+      // 只合并当前标的日期内的窗口；被过滤的历史窗口先喂给"历史场次捕获"（看板提示是否保存为场次）
+      const hist = upd.windows.filter(w => !oldDays.has(dayOf(w)));
+      if (hist.length) catchHistory(hist, upd, wallTs);
       upd = { ...upd, windows: upd.windows.filter(w => oldDays.has(dayOf(w))) };
       if (!upd.windows.length) return;
     }
@@ -790,6 +811,61 @@ function startServer() {
           res.end(JSON.stringify({ ok: false, err: e.message }));
         }
       });
+    } else if (url === '/api/history' && req.method === 'POST') {
+      // 历史场次：{action:'save', key, days, windows, newTrades?} 保存场次文件；{action:'dismiss', key} 忽略待存场次
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        const send = j => { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' }); res.end(JSON.stringify(j)); };
+        try {
+          const j = JSON.parse(body || '{}');
+          if (j.action === 'save') {
+            if (!/^D\d{8}(-\d{8})?$/.test(String(j.key || ''))) throw new Error('场次名格式不合法');
+            if (!Array.isArray(j.windows) || !j.windows.length) throw new Error('场次数据为空');
+            const rec = { key: j.key, days: j.days || [], savedAt: new Date().toISOString(), windowCount: j.windows.length, windows: j.windows, newTrades: j.newTrades || null };
+            const f = path.join(DATA, `场次_${j.key}.json`);
+            fs.writeFileSync(f, JSON.stringify(rec));
+            console.log(`📁 已保存历史场次 → ${path.basename(f)}（${rec.windowCount} 窗口）`);
+            delete state.meta.historyCatch[j.key];
+            scheduleFlush(); schedulePush();
+            send({ ok: true, file: path.basename(f) });
+          } else if (j.action === 'dismiss') {
+            if (state.meta.historyCatch[j.key]) { delete state.meta.historyCatch[j.key]; schedulePush(); }
+            send({ ok: true });
+          } else throw new Error('未知操作');
+        } catch (e) { send({ ok: false, err: e.message }); }
+      });
+    } else if (url === '/api/history/list') {
+      // 已保存场次列表：data/场次_*.json
+      const list = [];
+      try {
+        for (const f of fs.readdirSync(DATA)) {
+          if (!/^场次_D\d{8}(-\d{8})?\.json$/.test(f)) continue;
+          try {
+            const j = JSON.parse(fs.readFileSync(path.join(DATA, f), 'utf8'));
+            list.push({ file: f, key: j.key, days: j.days, savedAt: j.savedAt, windowCount: j.windowCount });
+          } catch {}
+        }
+      } catch {}
+      list.sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(JSON.stringify({ ok: true, list }));
+    } else if (url === '/api/history/get') {
+      const u2 = new URL(req.url, 'http://127.0.0.1');
+      const f = u2.searchParams.get('file') || '';
+      if (!/^场次_D\d{8}(-\d{8})?\.json$/.test(f)) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, err: '文件名不合法' }));
+      } else {
+        try {
+          const j = JSON.parse(fs.readFileSync(path.join(DATA, f), 'utf8'));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+          res.end(JSON.stringify({ ok: true, session: j }));
+        } catch (e) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, err: '读取失败：' + e.message }));
+        }
+      }
     } else if (url === '/api/stream') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive',
