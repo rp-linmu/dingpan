@@ -446,9 +446,12 @@ function mergeUpdate(upd, wallTs) {
       else { pendingSwitch = { days: new Set(newerDays) }; return; }
     } else {
       pendingSwitch = null;
-      // 只合并当前标的日期内的窗口；被过滤的历史窗口先喂给"历史场次捕获"（看板提示是否保存为场次）
+      // 只合并当前标的日期内的窗口（挡住查看历史交易窗口时混入的更旧日期）
       const hist = upd.windows.filter(w => !oldDays.has(dayOf(w)));
-      if (hist.length) catchHistory(hist, upd, wallTs);
+      // 历史场次捕获：接口返回的通常恰好是一个完整场次，且可能与当前标的共享日期
+      // （实证：查 9-10 场次时响应含 9+10 两日，而 10 日与当前 10-11 标的共享，若只按
+      //  "当前标的之外"切分会丢掉共享日）——因此用整个响应作为场次数据；主看板合并不受影响
+      if (hist.length) catchHistory(upd.windows, upd, wallTs);
       upd = { ...upd, windows: upd.windows.filter(w => oldDays.has(dayOf(w))) };
       if (!upd.windows.length) return;
     }
