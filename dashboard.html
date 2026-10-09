@@ -224,6 +224,7 @@
 
   <div class="panel">
     <h2>明细 <button class="primary" id="btnCsv" style="margin-left:auto">导出 CSV</button></h2>
+    <div id="tblSummary" style="margin-bottom:8px"></div>
     <div class="tbl-wrap"><table id="tbl">
       <thead><tr id="thead"></tr></thead>
       <tbody></tbody>
@@ -243,6 +244,7 @@
       <thead><tr><th style="text-align:left">交易代码</th><th style="text-align:left">时段</th><th>最新价</th><th>均价</th><th>最高</th><th>最低</th><th>集中竞争价</th><th>成交量</th></tr></thead>
       <tbody><tr><td colspan="8" style="text-align:center;color:var(--muted)">选择上方场次后点「查看」——在平台页查看历史交易窗口时，顶部会提示保存为场次</td></tr></tbody>
     </table></div>
+    <div id="histSummary" style="margin-top:10px"></div>
   </div>
 </div>
 
@@ -770,6 +772,7 @@ function renderHistoryTbl() {
       <td class="num">${fmt(ex.avg)}</td><td class="num">${fmt(ex.high)}</td><td class="num">${fmt(ex.low)}</td>
       <td class="num">${fmt(ex.centralized)}</td><td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td></tr>`;
   }).join('');
+  renderSummary(histCur.windows, $('#histSummary'));
 }
 
 function exportHistoryCsv() {
@@ -779,7 +782,8 @@ function exportHistoryCsv() {
     const ex = w.extras || {};
     return [dcode(w.id), w.label || '', fmt(w.price), fmt(ex.avg), fmt(ex.high), fmt(ex.low), fmt(ex.centralized), w.volume != null ? fmt(w.volume, 1) : ''];
   });
-  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n')
+    + '\r\n' + summaryCsvBlock(histCur.windows);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   a.download = `场次_${histCur.key}.csv`;
@@ -847,6 +851,61 @@ function renderTable() {
       <td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td>
       <td class="num">${hhmm(w.lastTs)}</td></tr>`;
   }).join('');
+  renderSummary(windowsSorted(), $('#tblSummary'));
+}
+
+// ===== 场次汇总：按日期统计成交电量/成交均价/集中出清均价/最后一笔成交均价 =====
+// 口径：成交均价、集中出清均价按窗口电量加权（Σ(价×量)/Σ量）；最后一笔成交均价为各窗口
+// 最新成交价的算术平均；电量含该日全部窗口。逐日期一行，末行整场合计。
+function sessionSummary(windows) {
+  const byDay = new Map();
+  for (const w of windows || []) {
+    const d = String(w.id).slice(0, 10);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(w);
+  }
+  const calc = ws => {
+    let vol = 0, avgSum = 0, avgVol = 0, cenSum = 0, cenVol = 0, lastSum = 0, lastN = 0;
+    for (const w of ws) {
+      const ex = w.extras || {};
+      const v = w.volume != null ? +w.volume : null;
+      if (v != null && v > 0) {
+        vol += v;
+        if (ex.avg != null) { avgSum += ex.avg * v; avgVol += v; }
+        if (ex.centralized != null) { cenSum += ex.centralized * v; cenVol += v; }
+      }
+      if (w.price != null) { lastSum += w.price; lastN++; }
+    }
+    return {
+      energy: vol,
+      avgPrice: avgVol > 0 ? avgSum / avgVol : null,
+      centralized: cenVol > 0 ? cenSum / cenVol : null,
+      lastAvg: lastN > 0 ? lastSum / lastN : null,
+    };
+  };
+  const dayLabel = d => `${+d.slice(5, 7)}月${+d.slice(8, 10)}日`;
+  const rows = [...byDay.keys()].sort().map(d => ({ label: dayLabel(d), ...calc(byDay.get(d)) }));
+  const total = { label: '整场合计', ...calc(windows || []) };
+  return { rows, total };
+}
+
+function renderSummary(windows, el) {
+  if (!windows || !windows.length) { el.innerHTML = ''; return; }
+  const s = sessionSummary(windows);
+  const tr = r => `<tr><td>${r.label}</td><td class="num">${fmt(r.energy, 1)}</td><td class="num">${fmt(r.avgPrice)}</td><td class="num">${fmt(r.centralized)}</td><td class="num">${fmt(r.lastAvg)}</td></tr>`;
+  el.innerHTML = `<table style="width:auto;min-width:520px;font-size:12.5px">
+    <thead><tr style="color:var(--muted)"><th style="text-align:left">场次汇总 · 日期</th><th>成交电量(兆瓦时)</th><th>成交均价(元/兆瓦时)</th><th>集中出清均价(元/兆瓦时)</th><th>最后一笔成交均价(元/兆瓦时)</th></tr></thead>
+    <tbody>${s.rows.map(tr).join('')}${tr(s.total)}</tbody></table>`;
+}
+
+// CSV 汇总区块：空行 + 小节标题 + 表头 + 逐日期行 + 整场合计行
+function summaryCsvBlock(windows) {
+  if (!windows || !windows.length) return '';
+  const s = sessionSummary(windows);
+  const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价(元/兆瓦时)', '集中出清均价(元/兆瓦时)', '最后一笔成交均价(元/兆瓦时)'];
+  const row = r => [r.label, fmt(r.energy, 1), fmt(r.avgPrice), fmt(r.centralized), fmt(r.lastAvg)];
+  return ['', head, ...s.rows.map(row), row(s.total)]
+    .map(r => r.map(c => `"${String(c ?? '')}"`).join(',')).join('\r\n');
 }
 
 function exportCsv() {
@@ -862,7 +921,8 @@ function exportCsv() {
       (w.history || []).map(h => hhmm(h.ts) + ':' + fmt(h.price)).join(' '),
     ];
   });
-  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n')
+    + '\r\n' + summaryCsvBlock(ws);
   // 文件名用当前标的的场次名（如 场次_D20261010-20261011.csv），与历史场次导出命名一致；无数据时退回时间戳
   const days = [...new Set(ws.map(w => String(w.id).slice(0, 10)))].sort();
   const sessionKey = days.length ? 'D' + days[0].replace(/-/g, '') + (days.length > 1 ? '-' + days[days.length - 1].replace(/-/g, '') : '') : '';
