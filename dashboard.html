@@ -863,9 +863,12 @@ function exportCsv() {
     ];
   });
   const csv = '\uFEFF' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  // 文件名用当前标的的场次名（如 场次_D20261010-20261011.csv），与历史场次导出命名一致；无数据时退回时间戳
+  const days = [...new Set(ws.map(w => String(w.id).slice(0, 10)))].sort();
+  const sessionKey = days.length ? 'D' + days[0].replace(/-/g, '') + (days.length > 1 ? '-' + days[days.length - 1].replace(/-/g, '') : '') : '';
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = '滚动撮合窗口_' + new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-') + '.csv';
+  a.download = sessionKey ? `场次_${sessionKey}.csv` : '滚动撮合窗口_' + new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-') + '.csv';
   a.click();
 }
 
