@@ -152,6 +152,7 @@
             <option value="15">15 分钟</option><option value="30">30 分钟</option>
           </select>
         </label>
+        <button id="patrolCsv" title="导出当前判定结果">导出 CSV</button>
         <span id="patrolStatus" style="font-size:11px;color:var(--muted)">未开启</span>
       </span>
     </h2>
@@ -698,6 +699,32 @@ function renderPatrol() {
 $('#patrolToggle').onclick = () => patrolSave({ enabled: !patrolCfg().enabled });
 $('#patrolInterval').onchange = () => patrolSave({});
 
+// 导出预期满足判定结果（窗口/预期/判定/最后巡检时间，附巡检设置与导出时间）
+function exportPatrolCsv() {
+  const cfg = patrolCfg();
+  const ws = windowsSorted();
+  if (!patrolSel.size) { alert('请先点击上方窗口标签选定巡检对象'); return; }
+  const head = ['窗口', '时段', '最新成交', '买入预期', '买入判定', '卖出预期', '卖出判定', '最后巡检时间'];
+  const rows = [...patrolSel].sort().map(code => {
+    const wi = ws.findIndex(x => dcode(x.id) === code);
+    const w = wi >= 0 ? ws[wi] : null;
+    const pb = wi >= 0 ? expect.buy[wi] : null, ps = wi >= 0 ? expect.sell[wi] : null;
+    const book = cfg.results && cfg.results[code];
+    const j = book ? judgePatrol(book, pb, ps) : { jb: { t: '待巡检' }, js: { t: '待巡检' } };
+    return [code, w ? w.label : '', fmt(w && w.price), pb != null ? fmt(pb, 1) : '', j.jb.t,
+      ps != null ? fmt(ps, 1) : '', j.js.t, book ? bjFull(book.ts) : ''];
+  });
+  const meta = [`巡检设置：${cfg.enabled ? '已开启' : '未开启'} · 间隔 ${cfg.intervalMin} 分钟 · 上轮 ${cfg.lastRoundTs ? bjFull(cfg.lastRoundTs) : '-'} · 导出时间 ${bjFull(new Date().toISOString())}`];
+  const csv = '\uFEFF' + [meta, head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const days = [...new Set(ws.map(w => String(w.id).slice(0, 10)))].sort();
+  const sessionKey = days.length ? 'D' + days[0].replace(/-/g, '') + (days.length > 1 ? '-' + days[days.length - 1].replace(/-/g, '') : '') : '';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = (sessionKey ? `预期满足监控_${sessionKey}` : '预期满足监控') + '.csv';
+  a.click();
+}
+$('#patrolCsv').onclick = exportPatrolCsv;
+
 // ===== 历史场次：查看历史交易窗口时提示保存为场次文件，随时查看/导出（纯被动数据） =====
 let histCur = null;   // 当前查看的已保存场次
 
@@ -906,7 +933,7 @@ function summaryCsvBlock(windows) {
   const s = sessionSummary(windows);
   const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价(元/兆瓦时)', '集中出清均价(元/兆瓦时)', '最后一笔成交均价(元/兆瓦时)'];
   const row = r => [r.label, fmt(r.energy, 1), fmt(r.avgPrice), fmt(r.centralized), fmt(r.lastAvg)];
-  return ['', head, ...s.rows.map(row), row(s.total)]
+  return [[''], head, ...s.rows.map(row), row(s.total)]
     .map(r => r.map(c => `"${String(c ?? '')}"`).join(',')).join('\r\n');
 }
 
