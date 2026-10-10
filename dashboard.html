@@ -886,9 +886,9 @@ function renderTable() {
   renderSummary(windowsSorted(), $('#tblSummary'));
 }
 
-// ===== 场次汇总：按日期统计成交电量/成交均价/集中出清均价/最后一笔成交均价 =====
-// 口径：成交均价、集中出清均价按窗口电量加权（Σ(价×量)/Σ量）；最后一笔成交均价为各窗口
-// 最新成交价的算术平均；电量含该日全部窗口。逐日期一行，末行整场合计。
+// ===== 场次汇总：按日期统计成交电量/成交均价(算术+加权)/集中出清均价/最后一笔成交均价 =====
+// 口径：成交均价两种——算术=各窗口均价简单平均，加权=Σ(价×量)/Σ量；集中出清均价按电量加权；
+// 最后一笔成交均价为各窗口最新成交价的算术平均；电量含该日全部窗口。逐日期一行，末行整场合计。
 function sessionSummary(windows) {
   const byDay = new Map();
   for (const w of windows || []) {
@@ -897,20 +897,21 @@ function sessionSummary(windows) {
     byDay.get(d).push(w);
   }
   const calc = ws => {
-    let vol = 0, avgSum = 0, avgVol = 0, cenSum = 0, cenVol = 0, lastSum = 0, lastN = 0;
+    let vol = 0, avgSum = 0, avgVol = 0, avgPlain = 0, avgN = 0, cenSum = 0, cenVol = 0, lastSum = 0, lastN = 0;
     for (const w of ws) {
       const ex = w.extras || {};
       const v = w.volume != null ? +w.volume : null;
       if (v != null && v > 0) {
         vol += v;
-        if (ex.avg != null) { avgSum += ex.avg * v; avgVol += v; }
         if (ex.centralized != null) { cenSum += ex.centralized * v; cenVol += v; }
       }
+      if (ex.avg != null) { avgPlain += ex.avg; avgN++; if (v != null && v > 0) { avgSum += ex.avg * v; avgVol += v; } }
       if (w.price != null) { lastSum += w.price; lastN++; }
     }
     return {
       energy: vol,
-      avgPrice: avgVol > 0 ? avgSum / avgVol : null,
+      avgWeighted: avgVol > 0 ? avgSum / avgVol : null,
+      avgArithmetic: avgN > 0 ? avgPlain / avgN : null,
       centralized: cenVol > 0 ? cenSum / cenVol : null,
       lastAvg: lastN > 0 ? lastSum / lastN : null,
     };
@@ -924,9 +925,9 @@ function sessionSummary(windows) {
 function renderSummary(windows, el) {
   if (!windows || !windows.length) { el.innerHTML = ''; return; }
   const s = sessionSummary(windows);
-  const tr = r => `<tr><td>${r.label}</td><td class="num">${fmt(r.energy, 1)}</td><td class="num">${fmt(r.avgPrice)}</td><td class="num">${fmt(r.centralized)}</td><td class="num">${fmt(r.lastAvg)}</td></tr>`;
-  el.innerHTML = `<table style="width:auto;min-width:520px;font-size:12.5px">
-    <thead><tr style="color:var(--muted)"><th style="text-align:left">场次汇总 · 日期</th><th>成交电量(兆瓦时)</th><th>成交均价(元/兆瓦时)</th><th>集中出清均价(元/兆瓦时)</th><th>最后一笔成交均价(元/兆瓦时)</th></tr></thead>
+  const tr = r => `<tr><td>${r.label}</td><td class="num">${fmt(r.energy, 1)}</td><td class="num">${fmt(r.avgArithmetic)}</td><td class="num">${fmt(r.avgWeighted)}</td><td class="num">${fmt(r.centralized)}</td><td class="num">${fmt(r.lastAvg)}</td></tr>`;
+  el.innerHTML = `<table style="width:auto;min-width:620px;font-size:12.5px">
+    <thead><tr style="color:var(--muted)"><th style="text-align:left">场次汇总 · 日期</th><th>成交电量(兆瓦时)</th><th>成交均价·算术(元/兆瓦时)</th><th>成交均价·加权(元/兆瓦时)</th><th>集中出清均价(元/兆瓦时)</th><th>最后一笔成交均价(元/兆瓦时)</th></tr></thead>
     <tbody>${s.rows.map(tr).join('')}${tr(s.total)}</tbody></table>`;
 }
 
@@ -934,8 +935,8 @@ function renderSummary(windows, el) {
 function summaryCsvBlock(windows) {
   if (!windows || !windows.length) return '';
   const s = sessionSummary(windows);
-  const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价(元/兆瓦时)', '集中出清均价(元/兆瓦时)', '最后一笔成交均价(元/兆瓦时)'];
-  const row = r => [r.label, fmt(r.energy, 1), fmt(r.avgPrice), fmt(r.centralized), fmt(r.lastAvg)];
+  const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价·算术(元/兆瓦时)', '成交均价·加权(元/兆瓦时)', '集中出清均价(元/兆瓦时)', '最后一笔成交均价(元/兆瓦时)'];
+  const row = r => [r.label, fmt(r.energy, 1), fmt(r.avgArithmetic), fmt(r.avgWeighted), fmt(r.centralized), fmt(r.lastAvg)];
   return [[''], head, ...s.rows.map(row), row(s.total)]
     .map(r => r.map(c => `"${String(c ?? '')}"`).join(',')).join('\r\n');
 }
