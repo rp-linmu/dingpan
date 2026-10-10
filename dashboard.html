@@ -803,7 +803,7 @@ function renderHistoryTbl() {
       <td class="num">${fmt(ex.avg)}</td><td class="num">${fmt(ex.high)}</td><td class="num">${fmt(ex.low)}</td>
       <td class="num">${fmt(ex.centralized)}</td><td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td></tr>`;
   }).join('');
-  renderSummary(histCur.windows, $('#histSummary'));
+  renderSummary(histCur.windows, $('#histSummary'), null);   // 历史场次无撮合当日快照，按累计量近似
 }
 
 function exportHistoryCsv() {
@@ -815,7 +815,7 @@ function exportHistoryCsv() {
   });
   const histName = savedSessionName(histCur.key, histCur.days);
   const csv = '\uFEFF' + [sessionTitleRow(histName), head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n')
-    + '\r\n' + summaryCsvBlock(histCur.windows);
+    + '\r\n' + summaryCsvBlock(histCur.windows, null);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   a.download = `${histName}.csv`;
@@ -883,13 +883,30 @@ function renderTable() {
       <td class="num">${w.volume != null ? fmt(w.volume, 1) : '-'}</td>
       <td class="num">${hhmm(w.lastTs)}</td></tr>`;
   }).join('');
-  renderSummary(windowsSorted(), $('#tblSummary'));
+  ensureCenEnergy(windowsSorted());
+  renderSummary(windowsSorted(), $('#tblSummary'), cenEnergyMap);
+}
+
+// ===== 集中出清电量精算数据（从当日快照提取；集中出清加权应使用集中阶段电量而非累计量） =====
+let cenEnergyMap = null;   // { __key, ...code: energy }
+function ensureCenEnergy(windows) {
+  const codes = (windows || []).map(w => dcode(w.id));
+  if (!codes.length) return;
+  const days = [new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '')];
+  const key = days.join() + '|' + codes.join();
+  if (cenEnergyMap && cenEnergyMap.__key === key) return;
+  cenEnergyMap = { __key: key };
+  fetch('/api/cenEnergy?codes=' + encodeURIComponent(codes.join(',')) + '&days=' + days.join(), { cache: 'no-store' })
+    .then(r => r.json())
+    .then(j => { if (j.ok) Object.assign(cenEnergyMap, j.cen || {}); renderAll(); })
+    .catch(() => {});
 }
 
 // ===== 场次汇总：按日期统计成交电量/成交均价(算术+加权)/集中出清均价(算术+加权)/最后一笔成交均价 =====
-// 口径：算术=各窗口该价格的简单平均；加权=Σ(价×量)/Σ量（电量加权）；最后一笔成交均价为各窗口
-// 最新成交价的算术平均；电量含该日全部窗口。逐日期一行，末行整场合计。
-function sessionSummary(windows) {
+// 口径：算术=各窗口该价格的简单平均；加权=Σ(价×量)/Σ量。成交均价按窗口累计电量加权；
+// 集中出清加权优先使用精算的"集中阶段电量"（cenMap，取自当日快照留痕），无精算数据时
+// 回退累计量并标注"近似"；最后一笔成交均价为各窗口最新成交价的算术平均。逐日期一行+整场合计。
+function sessionSummary(windows, cenMap) {
   const byDay = new Map();
   for (const w of windows || []) {
     const d = String(w.id).slice(0, 10);
@@ -898,13 +915,19 @@ function sessionSummary(windows) {
   }
   const calc = ws => {
     let vol = 0, avgSum = 0, avgVol = 0, avgPlain = 0, avgN = 0,
-        cenSum = 0, cenVol = 0, cenPlain = 0, cenN = 0, lastSum = 0, lastN = 0;
+        cenSum = 0, cenVol = 0, cenPlain = 0, cenN = 0, cenExactN = 0, lastSum = 0, lastN = 0;
     for (const w of ws) {
       const ex = w.extras || {};
+      const code = dcode(w.id);
       const v = w.volume != null ? +w.volume : null;
       if (v != null && v > 0) vol += v;
       if (ex.avg != null) { avgPlain += ex.avg; avgN++; if (v != null && v > 0) { avgSum += ex.avg * v; avgVol += v; } }
-      if (ex.centralized != null) { cenPlain += ex.centralized; cenN++; if (v != null && v > 0) { cenSum += ex.centralized * v; cenVol += v; } }
+      if (ex.centralized != null) {
+        cenPlain += ex.centralized; cenN++;
+        const cenE = cenMap && cenMap[code] != null ? cenMap[code] : (v != null && v > 0 ? v : null);
+        if (cenE != null && cenE > 0) { cenSum += ex.centralized * cenE; cenVol += cenE; }
+        if (cenMap && cenMap[code] != null) cenExactN++;
+      }
       if (w.price != null) { lastSum += w.price; lastN++; }
     }
     return {
@@ -913,6 +936,7 @@ function sessionSummary(windows) {
       avgWeighted: avgVol > 0 ? avgSum / avgVol : null,
       cenArithmetic: cenN > 0 ? cenPlain / cenN : null,
       cenWeighted: cenVol > 0 ? cenSum / cenVol : null,
+      cenExact: cenN > 0 && cenExactN === cenN,   // 全部窗口都有精算电量才算精确口径
       lastAvg: lastN > 0 ? lastSum / lastN : null,
     };
   };
@@ -921,23 +945,26 @@ function sessionSummary(windows) {
   const total = { label: '整场合计', ...calc(windows || []) };
   return { rows, total };
 }
+const cenColName = exact => exact ? '集中出清·加权(按集中电量)' : '集中出清·加权(按累计量*)';
 
-function renderSummary(windows, el) {
+function renderSummary(windows, el, cenMap) {
   if (!windows || !windows.length) { el.innerHTML = ''; return; }
-  const s = sessionSummary(windows);
+  const s = sessionSummary(windows, cenMap);
   const tr = r => `<tr><td>${r.label}</td><td class="num">${fmt(r.energy, 1)}</td><td class="num">${fmt(r.avgArithmetic)}</td><td class="num">${fmt(r.avgWeighted)}</td><td class="num">${fmt(r.cenArithmetic)}</td><td class="num">${fmt(r.cenWeighted)}</td><td class="num">${fmt(r.lastAvg)}</td></tr>`;
-  el.innerHTML = `<table style="width:auto;min-width:720px;font-size:12.5px">
-    <thead><tr style="color:var(--muted)"><th style="text-align:left">场次汇总 · 日期</th><th>成交电量(兆瓦时)</th><th>成交均价·算术(元/兆瓦时)</th><th>成交均价·加权(元/兆瓦时)</th><th>集中出清·算术(元/兆瓦时)</th><th>集中出清·加权(元/兆瓦时)</th><th>最后一笔成交均价(元/兆瓦时)</th></tr></thead>
-    <tbody>${s.rows.map(tr).join('')}${tr(s.total)}</tbody></table>`;
+  const foot = s.total.cenExact ? '' : `<div style="font-size:11px;color:var(--muted);margin-top:3px">* 暂无当日快照的集中阶段数据，集中出清加权暂按窗口累计电量近似</div>`;
+  el.innerHTML = `<table style="width:auto;min-width:760px;font-size:12.5px">
+    <thead><tr style="color:var(--muted)"><th style="text-align:left">场次汇总 · 日期</th><th>成交电量(兆瓦时)</th><th>成交均价·算术(元/兆瓦时)</th><th>成交均价·加权(元/兆瓦时)</th><th>集中出清·算术(元/兆瓦时)</th><th>${cenColName(s.total.cenExact)}(元/兆瓦时)</th><th>最后一笔成交均价(元/兆瓦时)</th></tr></thead>
+    <tbody>${s.rows.map(tr).join('')}${tr(s.total)}</tbody></table>${foot}`;
 }
 
-// CSV 汇总区块：空行 + 小节标题 + 表头 + 逐日期行 + 整场合计行
-function summaryCsvBlock(windows) {
+// CSV 汇总区块：空行 + 小节标题 + 表头 + 逐日期行 + 整场合计行（集中出清加权口径随精算数据动态标注）
+function summaryCsvBlock(windows, cenMap) {
   if (!windows || !windows.length) return '';
-  const s = sessionSummary(windows);
-  const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价·算术(元/兆瓦时)', '成交均价·加权(元/兆瓦时)', '集中出清·算术(元/兆瓦时)', '集中出清·加权(元/兆瓦时)', '最后一笔成交均价(元/兆瓦时)'];
+  const s = sessionSummary(windows, cenMap);
+  const head = ['场次汇总·日期', '成交电量(兆瓦时)', '成交均价·算术(元/兆瓦时)', '成交均价·加权(元/兆瓦时)', '集中出清·算术(元/兆瓦时)', cenColName(s.total.cenExact), '最后一笔成交均价(元/兆瓦时)'];
   const row = r => [r.label, fmt(r.energy, 1), fmt(r.avgArithmetic), fmt(r.avgWeighted), fmt(r.cenArithmetic), fmt(r.cenWeighted), fmt(r.lastAvg)];
-  return [[''], head, ...s.rows.map(row), row(s.total)]
+  const foot = s.total.cenExact ? [] : [['* 集中出清加权暂按窗口累计电量近似（无当日快照集中阶段数据）']];
+  return [[''], head, ...s.rows.map(row), row(s.total), ...foot]
     .map(r => r.map(c => `"${String(c ?? '')}"`).join(',')).join('\r\n');
 }
 
@@ -1025,7 +1052,7 @@ function exportCsv() {
     ];
   });
   const csv = '\uFEFF' + [sessionTitleRow(currentSessionName()), head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n')
-    + '\r\n' + summaryCsvBlock(ws);
+    + '\r\n' + summaryCsvBlock(ws, cenEnergyMap);
   // 文件名用场次完整名称（如 2026年10月10日至11日多日直接交易.csv）；无数据时退回时间戳
   const name = currentSessionName();
   const a = document.createElement('a');

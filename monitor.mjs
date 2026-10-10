@@ -650,6 +650,55 @@ async function patrolLoop() {
 
 
 
+// ---------------- 集中出清电量精算（事后，从快照留痕提取） ----------------
+// 接口响应无"集中出清电量"字段（totalBidEnergy 为集中+滚动累计），而集中出清价的加权
+// 应使用集中阶段的电量。快照留痕保存了每次响应（内容变化即落盘），故集中阶段电量可
+// 事后精算：每窗口取"滚动开始"时刻之前最后一次 totalBidEnergy。
+// 滚动开始时刻取自快照中 findJysbysSeqInfo 的 stagetime（缺省按 09:30 北京时）。
+import readline from 'node:readline';
+
+const CEN_DEFAULT_ROLL = 9.5 * 3600;   // 滚动开始缺省值：北京时间 09:30（秒）
+async function computeCenEnergy(codes, days) {
+  const want = new Set(codes);
+  const out = {};
+  for (const day of days) {
+    const f = path.join(DATA, `snapshots_${day}.jsonl`);
+    if (!fs.existsSync(f)) continue;
+    let rollStart = CEN_DEFAULT_ROLL;
+    const lastE = new Map();   // code -> 滚动开始前最后累计量
+    const rl = readline.createInterface({ input: fs.createReadStream(f), crlfDelay: Infinity });
+    for await (const line of rl) {
+      let rec; try { rec = JSON.parse(line); } catch { continue; }
+      if (!rec.body || !rec.ts) continue;
+      const d = new Date(rec.ts);
+      const bjSec = ((d.getTime() / 1000 + 8 * 3600) % 86400 + 86400) % 86400;   // 北京时刻的当日秒数
+      if (rec.key.includes('findJysbysSeqInfo')) {
+        try {
+          const st = JSON.parse(rec.body).data.stagetime || [];
+          const r = st.find(x => x.name === '滚动开始' && /^\d{2}:\d{2}$/.test(x.time || ''));
+          if (r) rollStart = (+r.time.slice(0, 2)) * 3600 + (+r.time.slice(3, 5)) * 60;
+        } catch {}
+        continue;
+      }
+      if (!rec.key.includes('findBuy5AndSell5') || bjSec >= rollStart) continue;
+      try {
+        const arr = JSON.parse(rec.body).data.findMarketCountInfo || [];
+        for (const r of arr) {
+          const code = String(r.jydm || '');
+          if (!want.has(code)) continue;
+          const e = parseFloat(r.totalBidEnergy);
+          if (isFinite(e) && e > 0) lastE.set(code, e);
+        }
+      } catch {}
+    }
+    for (const [code, e] of lastE) if (out[code] == null || e > out[code]) out[code] = e;
+  }
+  return out;
+}
+
+// 精算缓存：同参数 10 分钟内不重扫（快照文件大，流式扫描秒级）
+let cenCache = { key: '', at: 0, data: {} };
+
 // 用系统默认浏览器打开看板（--no-open 可关闭）
 function openBrowser(url) {
   try {
@@ -838,6 +887,26 @@ function startServer() {
           } else throw new Error('未知操作');
         } catch (e) { send({ ok: false, err: e.message }); }
       });
+    } else if (url === '/api/cenEnergy') {
+      // 集中出清电量精算：?codes=D..,D..&days=20261010（缺省今天）；从快照留痕提取各窗口
+      // "滚动开始"时刻前的累计量（即集中阶段电量），供汇总的集中出清加权使用
+      const u2 = new URL(req.url, 'http://127.0.0.1');
+      const codes = (u2.searchParams.get('codes') || '').split(',').filter(c => /^D\d{8}_H\d{2}$/.test(c)).slice(0, 200);
+      const days = (u2.searchParams.get('days') || '').split(',').filter(d => /^\d{8}$/.test(d)).slice(0, 7);
+      if (!days.length) days.push(new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10).replace(/-/g, ''));
+      const jh = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' };
+      const key = days.join() + '|' + codes.join();
+      if (cenCache.key === key && Date.now() - cenCache.at < 10 * 60e3) {
+        res.writeHead(200, jh); res.end(JSON.stringify({ ok: true, cen: cenCache.data, cached: true }));
+      } else {
+        try {
+          const cen = await computeCenEnergy(codes, days);
+          cenCache = { key, at: Date.now(), data: cen };
+          res.writeHead(200, jh); res.end(JSON.stringify({ ok: true, cen }));
+        } catch (e) {
+          res.writeHead(200, jh); res.end(JSON.stringify({ ok: false, err: e.message }));
+        }
+      }
     } else if (url === '/api/history/list') {
       // 已保存场次列表：data/场次_*.json
       const list = [];
