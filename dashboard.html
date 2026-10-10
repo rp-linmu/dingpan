@@ -158,7 +158,7 @@
     <div style="font-size:12px;color:var(--muted);margin:4px 0 6px">
       点击窗口标签选定巡检对象（最多 12 个，当前 <span class="num" id="patrolCount">0</span> 个）。开启后按设定间隔自动查询各窗口买卖五档，
       对照买入/卖出预期价给出满足判定；<b>五档与申报量明细</b>为备选项——点击全景图柱子在盘口面板查看。
-      买入判定：可吃量=卖方申报中价 ≤ 预期的量，竞争量=买方申报中价 &gt; 预期的量；卖出对称。仅覆盖五档可见范围。
+      买入判定：卖方申报价<b>低于</b>你的预期价时，提示可买电量（这些挂单下单即可成交）；卖出判定：买方申报价<b>高于</b>你的预期价时，提示可卖电量。仅覆盖五档可见范围。
     </div>
     <div class="wgrid" id="patrolGrid" style="max-height:88px"></div>
     <div class="tbl-wrap" style="max-height:300px;margin-top:6px"><table id="patrolTbl">
@@ -628,26 +628,28 @@ async function patrolSave(patch) {
   } catch (e) { /* 看板服务未连接时静默，状态栏已有提示 */ }
 }
 
-// 满足度判定（基于五档可见范围）：
-//   买入：可吃量=卖方申报中价≤买入预期的量；竞争量=买方申报中价>预期的量；可吃=0 表示卖一价高于预期
-//   卖出：可吃量=买方申报中价≥卖出预期的量；竞争量=卖方申报中价<预期的量
+// 满足度判定（基于五档可见范围，按用户业务口径）：
+//   买入：看卖方申报——卖价 < 买入预期价的申报量之和 = 可买量（这些挂单下单即可成交；
+//         盘口是竞争后的剩余，买卖价交叉的早已成交，故无需再比较买方竞争）
+//   卖出：看买方申报——买价 > 卖出预期价的申报量之和 = 可卖量
 function judgePatrol(book, pb, ps) {
-  const F = (arr, cond) => (arr || []).filter(cond).reduce((a, x) => a + x.qty, 0);
-  const minSell = (book.sells || []).length ? Math.min(...book.sells.map(s => s.price)) : null;
-  const maxBuy = (book.buys || []).length ? Math.max(...book.buys.map(b => b.price)) : null;
+  const sells = book.sells || [], buys = book.buys || [];
+  const minSell = sells.length ? Math.min(...sells.map(s => s.price)) : null;
+  const maxBuy = buys.length ? Math.max(...buys.map(b => b.price)) : null;
+  const F = (arr, cond) => arr.filter(cond).reduce((a, x) => a + x.qty, 0);
   let jb = { t: '未设预期' };
   if (pb != null) {
-    const eat = F(book.sells, s => s.price <= pb), comp = F(book.buys, b => b.price > pb);
-    jb = eat <= 0 ? { t: `❌ 卖一 ${fmt(minSell, 1)} 高于预期，暂无可吃量` }
-      : eat >= comp ? { t: `✅ 可吃 ${eat.toFixed(1)} ≥ 竞争 ${comp.toFixed(1)}` }
-      : { t: `⚠️ 可吃 ${eat.toFixed(1)} ＜ 竞争 ${comp.toFixed(1)}` };
+    const canBuy = F(sells, s => s.price < pb);
+    jb = canBuy > 0
+      ? { t: `✅ 可买 ${canBuy.toFixed(1)}（最低卖价 ${fmt(minSell, 3)} ＜ 预期）` }
+      : { t: `❌ 卖一 ${minSell != null ? fmt(minSell, 3) : '-'} 未低于预期，暂无可买量` };
   }
   let js = { t: '未设预期' };
   if (ps != null) {
-    const eat = F(book.buys, b => b.price >= ps), comp = F(book.sells, s => s.price < ps);
-    js = eat <= 0 ? { t: `❌ 买一 ${fmt(maxBuy, 1)} 低于预期，暂无对手量` }
-      : eat >= comp ? { t: `✅ 可吃 ${eat.toFixed(1)} ≥ 竞争 ${comp.toFixed(1)}` }
-      : { t: `⚠️ 可吃 ${eat.toFixed(1)} ＜ 竞争 ${comp.toFixed(1)}` };
+    const canSell = F(buys, b => b.price > ps);
+    js = canSell > 0
+      ? { t: `✅ 可卖 ${canSell.toFixed(1)}（最高买价 ${fmt(maxBuy, 3)} ＞ 预期）` }
+      : { t: `❌ 买一 ${maxBuy != null ? fmt(maxBuy, 3) : '-'} 未高于预期，暂无可卖量` };
   }
   return { jb, js };
 }
